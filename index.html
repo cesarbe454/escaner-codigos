@@ -3,48 +3,84 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Escáner → Google Sheets</title>
+  <title>Escáner Code 128 → Google Sheets</title>
+
   <style>
-    body { font-family: system-ui, Arial; margin: 16px; }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0; }
-    button, input { font-size:16px; padding:10px 12px; }
-    #video { width:100%; max-width:520px; border-radius:14px; background:#000; }
-    #log { white-space:pre-wrap; background:#f5f5f5; padding:12px; border-radius:14px; }
-    .ok { color:#0a7; font-weight:600; }
-    .err { color:#c00; font-weight:600; }
-    small { color:#555; }
+    body {
+      font-family: system-ui, Arial, sans-serif;
+      margin: 16px;
+      background: #ffffff;
+    }
+    h2 { margin-bottom: 6px; }
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin: 10px 0;
+    }
+    input, button {
+      font-size: 16px;
+      padding: 10px 12px;
+    }
+    button {
+      cursor: pointer;
+    }
+    #video {
+      width: 100%;
+      max-width: 520px;
+      border-radius: 16px;
+      background: #000;
+    }
+    #log {
+      white-space: pre-wrap;
+      background: #f5f5f5;
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 14px;
+    }
+    .ok { color: #0a7; font-weight: 600; }
+    .err { color: #c00; font-weight: 600; }
+    small { color: #555; }
   </style>
 </head>
+
 <body>
-  <h2>Escáner (EAN/UPC + QR) → Google Sheets</h2>
+
+  <h2>📷 Escáner Code 128 → Google Sheets</h2>
+  <small>Lee Code 128 (prioridad), EAN/UPC y QR</small>
 
   <div class="row">
     <input id="user" placeholder="Usuario (obligatorio)" />
     <button id="btnStart">Iniciar cámara</button>
     <button id="btnStop" disabled>Detener</button>
   </div>
-  <small>Tip: En móvil, abre la app en HTTPS para que funcione la cámara.</small>
 
-  <p><b>Vista cámara</b></p>
+  <p><b>Vista de la cámara</b></p>
   <video id="video" playsinline></video>
 
-  <p><b>Último código leído</b>: <span id="lastCode">—</span></p>
+  <p><b>Último código leído:</b> <span id="lastCode">—</span></p>
 
   <div class="row">
-    <input id="manualCode" placeholder="O digita el código manualmente" />
+    <input id="manualCode" placeholder="Ingreso manual de código" />
     <button id="btnSendManual">Enviar</button>
   </div>
 
   <h3>Registro</h3>
-  <div id="log">Listo.</div>
+  <div id="log">Sistema listo.</div>
 
-  <!-- Librería de escaneo -->
+  <!-- ZXing -->
   <script src="https://unpkg.com/@zxing/library@latest"></script>
 
   <script>
-    // 👇 Pega aquí tu URL del Apps Script desplegado
-    const APPS_SCRIPT_URL = "https://cesarbe454.github.io/escaner-codigos/";
+    /************************************************************
+     * CONFIGURACIÓN
+     ************************************************************/
+    const APPS_SCRIPT_URL = "https://cesarbe454.github.io/escaner-codigos/"; // 👈 REEMPLAZAR
 
+    /************************************************************
+     * ELEMENTOS
+     ************************************************************/
     const videoEl = document.getElementById("video");
     const lastCodeEl = document.getElementById("lastCode");
     const logEl = document.getElementById("log");
@@ -59,11 +95,14 @@
     let codeReader = null;
     let controls = null;
 
-    // Evitar duplicados: mismo código leído en pocos segundos
+    // Evitar duplicados
     let lastSent = "";
     let lastSentAt = 0;
     const DUP_MS = 2000;
 
+    /************************************************************
+     * FUNCIONES
+     ************************************************************/
     function log(msg, cls="") {
       const line = cls ? `<span class="${cls}">${msg}</span>` : msg;
       logEl.innerHTML = line + "\n" + logEl.innerHTML;
@@ -72,13 +111,14 @@
     async function sendCode(code) {
       const user = (userEl.value || "").trim();
       if (!user) {
-        alert("Debes escribir el usuario antes de enviar.");
+        alert("Debes escribir el usuario.");
         return;
       }
 
       const now = Date.now();
       if (code === lastSent && (now - lastSentAt) < DUP_MS) return;
-      lastSent = code; lastSentAt = now;
+      lastSent = code;
+      lastSentAt = now;
 
       lastCodeEl.textContent = code;
 
@@ -91,60 +131,94 @@
 
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {
-          log("✓ Guardado: " + code + " | usuario: " + user, "ok");
+          log(`✓ Guardado | Código: ${code} | Usuario: ${user}`, "ok");
         } else {
-          log("✗ Error: " + (data.error || ("HTTP " + res.status)), "err");
+          log(`✗ Error API: ${data.error || res.status}`, "err");
         }
       } catch (e) {
-        log("✗ Falló envío: " + e.message, "err");
+        log("✗ Falló el envío: " + e.message, "err");
       }
     }
 
+    /************************************************************
+     * INICIAR CÁMARA
+     ************************************************************/
     btnStart.addEventListener("click", async () => {
       if (APPS_SCRIPT_URL.includes("PEGA_AQUI")) {
-        alert("Primero pega tu URL en APPS_SCRIPT_URL.");
+        alert("Debes pegar la URL del Apps Script.");
         return;
       }
       if (!(userEl.value || "").trim()) {
-        alert("Primero escribe el usuario.");
+        alert("Debes ingresar el usuario.");
         return;
       }
 
       try {
-        codeReader = new ZXing.BrowserMultiFormatReader();
+        const hints = new Map();
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+          ZXing.BarcodeFormat.CODE_128, // 👈 PRIORIDAD
+          ZXing.BarcodeFormat.EAN_13,
+          ZXing.BarcodeFormat.EAN_8,
+          ZXing.BarcodeFormat.UPC_A,
+          ZXing.BarcodeFormat.UPC_E,
+          ZXing.BarcodeFormat.QR_CODE
+        ]);
+        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+        codeReader = new ZXing.BrowserMultiFormatReader(hints);
+
         btnStart.disabled = true;
         btnStop.disabled = false;
 
         controls = await codeReader.decodeFromVideoDevice(
-          null, // elige cámara por defecto (en móviles suele tomar trasera)
+          null,
           videoEl,
           (result, err) => {
-            if (result) sendCode(result.getText());
+            if (result) {
+              const text = result.getText();
+              const format = result.getBarcodeFormat?.() || "desconocido";
+
+              // 👉 SOLO Code 128 (opcional)
+              // if (format !== ZXing.BarcodeFormat.CODE_128) return;
+
+              log(`Detectado (${format}): ${text}`);
+              sendCode(text);
+            }
           }
         );
 
-        log("Cámara iniciada.");
+        log("📷 Cámara iniciada (Code 128 prioritario).");
       } catch (e) {
         btnStart.disabled = false;
         btnStop.disabled = true;
-        log("No se pudo iniciar cámara: " + e.message, "err");
+        log("No se pudo iniciar la cámara: " + e.message, "err");
       }
     });
 
+    /************************************************************
+     * DETENER CÁMARA
+     ************************************************************/
     btnStop.addEventListener("click", () => {
       try { if (controls) controls.stop(); } catch {}
       try { if (codeReader) codeReader.reset(); } catch {}
       btnStart.disabled = false;
       btnStop.disabled = true;
-      log("Cámara detenida.");
+      log("⏹️ Cámara detenida.");
     });
 
+    /************************************************************
+     * ENVÍO MANUAL
+     ************************************************************/
     btnSendManual.addEventListener("click", () => {
       const code = (manualCodeEl.value || "").trim();
-      if (!code) return alert("Digita un código.");
+      if (!code) {
+        alert("Ingresa un código.");
+        return;
+      }
       sendCode(code);
       manualCodeEl.value = "";
     });
   </script>
+
 </body>
 </html>
