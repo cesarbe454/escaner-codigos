@@ -6,60 +6,36 @@
   <title>Escáner Code 128 → Google Sheets</title>
 
   <style>
-    body {
-      font-family: system-ui, Arial, sans-serif;
-      margin: 16px;
-      background: #ffffff;
-    }
+    body { font-family: system-ui, Arial, sans-serif; margin: 16px; background:#fff; }
     h2 { margin-bottom: 6px; }
-    .row {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
-      margin: 10px 0;
-    }
-    input, button {
-      font-size: 16px;
-      padding: 10px 12px;
-    }
-    button {
-      cursor: pointer;
-    }
-    #video {
-      width: 100%;
-      max-width: 520px;
-      border-radius: 16px;
-      background: #000;
-    }
-    #log {
-      white-space: pre-wrap;
-      background: #f5f5f5;
-      padding: 12px;
-      border-radius: 12px;
-      font-size: 14px;
-    }
-    .ok { color: #0a7; font-weight: 600; }
-    .err { color: #c00; font-weight: 600; }
-    small { color: #555; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0; }
+    input, button { font-size:16px; padding:10px 12px; }
+    button { cursor:pointer; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    #video { width:100%; max-width:520px; border-radius:16px; background:#000; }
+    #log { white-space:pre-wrap; background:#f5f5f5; padding:12px; border-radius:12px; font-size:14px; }
+    .ok { color:#0a7; font-weight:600; }
+    .err { color:#c00; font-weight:600; }
+    small { color:#555; }
   </style>
 </head>
 
 <body>
-
-  <h2>📷 Escáner Code 128 → Google Sheets</h2>
-  <small>Lee Code 128 (prioridad), EAN/UPC y QR</small>
+  <h2>📷 Escáner (con botón) → Google Sheets</h2>
+  <small>Prioriza Code 128, también EAN/UPC y QR</small>
 
   <div class="row">
     <input id="user" placeholder="Usuario (obligatorio)" />
     <button id="btnStart">Iniciar cámara</button>
     <button id="btnStop" disabled>Detener</button>
+    <button id="btnScan" disabled>Escanear</button>
   </div>
 
   <p><b>Vista de la cámara</b></p>
   <video id="video" playsinline></video>
 
-  <p><b>Último código leído:</b> <span id="lastCode">—</span></p>
+  <p><b>Último código detectado:</b> <span id="lastDetected">—</span></p>
+  <p><b>Último código guardado:</b> <span id="lastSaved">—</span></p>
 
   <div class="row">
     <input id="manualCode" placeholder="Ingreso manual de código" />
@@ -82,27 +58,28 @@
      * ELEMENTOS
      ************************************************************/
     const videoEl = document.getElementById("video");
-    const lastCodeEl = document.getElementById("lastCode");
     const logEl = document.getElementById("log");
 
     const btnStart = document.getElementById("btnStart");
-    const btnStop = document.getElementById("btnStop");
+    const btnStop  = document.getElementById("btnStop");
+    const btnScan  = document.getElementById("btnScan");
 
     const userEl = document.getElementById("user");
     const manualCodeEl = document.getElementById("manualCode");
     const btnSendManual = document.getElementById("btnSendManual");
 
+    const lastDetectedEl = document.getElementById("lastDetected");
+    const lastSavedEl = document.getElementById("lastSaved");
+
     let codeReader = null;
     let controls = null;
 
-    // Evitar duplicados
-    let lastSent = "";
-    let lastSentAt = 0;
+    // Guardamos el "último detectado" y el "último guardado"
+    let lastDetected = "";
+    let lastSaved = "";
+    let lastSavedAt = 0;
     const DUP_MS = 2000;
 
-    /************************************************************
-     * FUNCIONES
-     ************************************************************/
     function log(msg, cls="") {
       const line = cls ? `<span class="${cls}">${msg}</span>` : msg;
       logEl.innerHTML = line + "\n" + logEl.innerHTML;
@@ -110,17 +87,13 @@
 
     async function sendCode(code) {
       const user = (userEl.value || "").trim();
-      if (!user) {
-        alert("Debes escribir el usuario.");
-        return;
-      }
+      if (!user) { alert("Debes escribir el usuario."); return; }
 
       const now = Date.now();
-      if (code === lastSent && (now - lastSentAt) < DUP_MS) return;
-      lastSent = code;
-      lastSentAt = now;
-
-      lastCodeEl.textContent = code;
+      if (code === lastSaved && (now - lastSavedAt) < DUP_MS) {
+        log("↺ Duplicado ignorado: " + code);
+        return;
+      }
 
       try {
         const res = await fetch(APPS_SCRIPT_URL, {
@@ -131,6 +104,9 @@
 
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {
+          lastSaved = code;
+          lastSavedAt = now;
+          lastSavedEl.textContent = code;
           log(`✓ Guardado | Código: ${code} | Usuario: ${user}`, "ok");
         } else {
           log(`✗ Error API: ${data.error || res.status}`, "err");
@@ -140,8 +116,21 @@
       }
     }
 
+    function setUI(state) {
+      // state: "stopped" | "started"
+      if (state === "started") {
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+        btnScan.disabled = false;
+      } else {
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        btnScan.disabled = true;
+      }
+    }
+
     /************************************************************
-     * INICIAR CÁMARA
+     * INICIAR CÁMARA (NO GUARDA AUTOMÁTICO)
      ************************************************************/
     btnStart.addEventListener("click", async () => {
       if (APPS_SCRIPT_URL.includes("PEGA_AQUI")) {
@@ -154,9 +143,10 @@
       }
 
       try {
+        // Hints para priorizar Code 128
         const hints = new Map();
         hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-          ZXing.BarcodeFormat.CODE_128, // 👈 PRIORIDAD
+          ZXing.BarcodeFormat.CODE_128,
           ZXing.BarcodeFormat.EAN_13,
           ZXing.BarcodeFormat.EAN_8,
           ZXing.BarcodeFormat.UPC_A,
@@ -167,32 +157,37 @@
 
         codeReader = new ZXing.BrowserMultiFormatReader(hints);
 
-        btnStart.disabled = true;
-        btnStop.disabled = false;
+        setUI("started");
 
+        // Detecta continuamente, pero SOLO actualiza "último detectado"
         controls = await codeReader.decodeFromVideoDevice(
           null,
           videoEl,
           (result, err) => {
             if (result) {
               const text = result.getText();
-              const format = result.getBarcodeFormat?.() || "desconocido";
-
-              // 👉 SOLO Code 128 (opcional)
-              // if (format !== ZXing.BarcodeFormat.CODE_128) return;
-
-              log(`Detectado (${format}): ${text}`);
-              sendCode(text);
+              lastDetected = text;
+              lastDetectedEl.textContent = text;
             }
           }
         );
 
-        log("📷 Cámara iniciada (Code 128 prioritario).");
+        log("📷 Cámara iniciada. Apunta al código y presiona “Escanear”.");
       } catch (e) {
-        btnStart.disabled = false;
-        btnStop.disabled = true;
+        setUI("stopped");
         log("No se pudo iniciar la cámara: " + e.message, "err");
       }
+    });
+
+    /************************************************************
+     * BOTÓN ESCANEAR (GUARDA EL ÚLTIMO DETECTADO)
+     ************************************************************/
+    btnScan.addEventListener("click", () => {
+      if (!lastDetected) {
+        alert("No se detectó ningún código. Acerca la cámara y vuelve a intentar.");
+        return;
+      }
+      sendCode(lastDetected);
     });
 
     /************************************************************
@@ -201,8 +196,9 @@
     btnStop.addEventListener("click", () => {
       try { if (controls) controls.stop(); } catch {}
       try { if (codeReader) codeReader.reset(); } catch {}
-      btnStart.disabled = false;
-      btnStop.disabled = true;
+      lastDetected = "";
+      lastDetectedEl.textContent = "—";
+      setUI("stopped");
       log("⏹️ Cámara detenida.");
     });
 
@@ -211,10 +207,7 @@
      ************************************************************/
     btnSendManual.addEventListener("click", () => {
       const code = (manualCodeEl.value || "").trim();
-      if (!code) {
-        alert("Ingresa un código.");
-        return;
-      }
+      if (!code) { alert("Ingresa un código."); return; }
       sendCode(code);
       manualCodeEl.value = "";
     });
