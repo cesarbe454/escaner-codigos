@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Escáner → Google Sheets</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 16px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0; }
+    button, input { font-size:16px; padding:10px 12px; }
+    #video { width:100%; max-width:520px; border-radius:14px; background:#000; }
+    #log { white-space:pre-wrap; background:#f5f5f5; padding:12px; border-radius:14px; }
+    .ok { color:#0a7; font-weight:600; }
+    .err { color:#c00; font-weight:600; }
+    small { color:#555; }
+  </style>
+</head>
+<body>
+  <h2>Escáner (EAN/UPC + QR) → Google Sheets</h2>
+
+  <div class="row">
+    <input id="user" placeholder="Usuario (obligatorio)" />
+    <button id="btnStart">Iniciar cámara</button>
+    <button id="btnStop" disabled>Detener</button>
+  </div>
+  <small>Tip: En móvil, abre la app en HTTPS para que funcione la cámara.</small>
+
+  <p><b>Vista cámara</b></p>
+  <video id="video" playsinline></video>
+
+  <p><b>Último código leído</b>: <span id="lastCode">—</span></p>
+
+  <div class="row">
+    <input id="manualCode" placeholder="O digita el código manualmente" />
+    <button id="btnSendManual">Enviar</button>
+  </div>
+
+  <h3>Registro</h3>
+  <div id="log">Listo.</div>
+
+  <!-- Librería de escaneo -->
+  <script src="https://unpkg.com/@zxing/library@latest"></script>
+
+  <script>
+    // 👇 Pega aquí tu URL del Apps Script desplegado
+    const APPS_SCRIPT_URL = "PEGA_AQUI_TU_URL";
+
+    const videoEl = document.getElementById("video");
+    const lastCodeEl = document.getElementById("lastCode");
+    const logEl = document.getElementById("log");
+
+    const btnStart = document.getElementById("btnStart");
+    const btnStop = document.getElementById("btnStop");
+
+    const userEl = document.getElementById("user");
+    const manualCodeEl = document.getElementById("manualCode");
+    const btnSendManual = document.getElementById("btnSendManual");
+
+    let codeReader = null;
+    let controls = null;
+
+    // Evitar duplicados: mismo código leído en pocos segundos
+    let lastSent = "";
+    let lastSentAt = 0;
+    const DUP_MS = 2000;
+
+    function log(msg, cls="") {
+      const line = cls ? `<span class="${cls}">${msg}</span>` : msg;
+      logEl.innerHTML = line + "\n" + logEl.innerHTML;
+    }
+
+    async function sendCode(code) {
+      const user = (userEl.value || "").trim();
+      if (!user) {
+        alert("Debes escribir el usuario antes de enviar.");
+        return;
+      }
+
+      const now = Date.now();
+      if (code === lastSent && (now - lastSentAt) < DUP_MS) return;
+      lastSent = code; lastSentAt = now;
+
+      lastCodeEl.textContent = code;
+
+      try {
+        const res = await fetch(APPS_SCRIPT_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, user })
+        });
+
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          log("✓ Guardado: " + code + " | usuario: " + user, "ok");
+        } else {
+          log("✗ Error: " + (data.error || ("HTTP " + res.status)), "err");
+        }
+      } catch (e) {
+        log("✗ Falló envío: " + e.message, "err");
+      }
+    }
+
+    btnStart.addEventListener("click", async () => {
+      if (APPS_SCRIPT_URL.includes("PEGA_AQUI")) {
+        alert("Primero pega tu URL en APPS_SCRIPT_URL.");
+        return;
+      }
+      if (!(userEl.value || "").trim()) {
+        alert("Primero escribe el usuario.");
+        return;
+      }
+
+      try {
+        codeReader = new ZXing.BrowserMultiFormatReader();
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+
+        controls = await codeReader.decodeFromVideoDevice(
+          null, // elige cámara por defecto (en móviles suele tomar trasera)
+          videoEl,
+          (result, err) => {
+            if (result) sendCode(result.getText());
+          }
+        );
+
+        log("Cámara iniciada.");
+      } catch (e) {
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        log("No se pudo iniciar cámara: " + e.message, "err");
+      }
+    });
+
+    btnStop.addEventListener("click", () => {
+      try { if (controls) controls.stop(); } catch {}
+      try { if (codeReader) codeReader.reset(); } catch {}
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      log("Cámara detenida.");
+    });
+
+    btnSendManual.addEventListener("click", () => {
+      const code = (manualCodeEl.value || "").trim();
+      if (!code) return alert("Digita un código.");
+      sendCode(code);
+      manualCodeEl.value = "";
+    });
+  </script>
+</body>
+</html>
