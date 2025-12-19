@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Escáner Code 128 → Google Sheets</title>
+  <title>Escáner Code 128 + OCR → Google Sheets</title>
 
   <style>
     body { font-family: system-ui, Arial, sans-serif; margin: 16px; background:#fff; }
@@ -11,31 +11,47 @@
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0; }
     input, button { font-size:16px; padding:10px 12px; }
     button { cursor:pointer; }
-    button:disabled { opacity: .6; cursor: not-allowed; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
     #video { width:100%; max-width:520px; border-radius:16px; background:#000; }
     #log { white-space:pre-wrap; background:#f5f5f5; padding:12px; border-radius:12px; font-size:14px; }
     .ok { color:#0a7; font-weight:600; }
     .err { color:#c00; font-weight:600; }
     small { color:#555; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
   </style>
 </head>
 
 <body>
-  <h2>📷 Escáner (con botón) → Google Sheets</h2>
-  <small>Prioriza Code 128, también EAN/UPC y QR</small>
+  <h2>📷 Escáner Code 128 (prioridad) + OCR (números) → Google Sheets</h2>
+  <small>
+    Flujo: Iniciar cámara → Escanear. Si no lee, usa Detectar números (OCR).
+  </small>
 
   <div class="row">
     <input id="user" placeholder="Usuario (obligatorio)" />
     <button id="btnStart">Iniciar cámara</button>
     <button id="btnStop" disabled>Detener</button>
-    <button id="btnScan" disabled>Escanear</button>
+  </div>
+
+  <div class="row">
+    <button id="btnScan" disabled>Escanear (código de barras/QR)</button>
+    <button id="btnOCR" disabled>Detectar números (OCR)</button>
+    <button id="btnCopy" disabled>Copiar</button>
+    <button id="btnSaveDetected" disabled>Guardar detectado</button>
   </div>
 
   <p><b>Vista de la cámara</b></p>
   <video id="video" playsinline></video>
+  <canvas id="canvas" style="display:none;"></canvas>
 
-  <p><b>Último código detectado:</b> <span id="lastDetected">—</span></p>
-  <p><b>Último código guardado:</b> <span id="lastSaved">—</span></p>
+  <p><b>Último código detectado (barcode)</b>: <span id="lastDetected">—</span></p>
+
+  <div class="row">
+    <input id="detectedText" class="mono" placeholder="Aquí aparecerán números detectados por OCR..." style="min-width:280px; flex:1;" />
+  </div>
+  <small>
+    Tip OCR: buena luz, acerca el texto, y evita reflejos. OCR puede tardar unos segundos.
+  </small>
 
   <div class="row">
     <input id="manualCode" placeholder="Ingreso manual de código" />
@@ -45,8 +61,10 @@
   <h3>Registro</h3>
   <div id="log">Sistema listo.</div>
 
-  <!-- ZXing -->
+  <!-- ZXing (lector de barras/QR) -->
   <script src="https://unpkg.com/@zxing/library@latest"></script>
+  <!-- Tesseract (OCR en navegador) -->
+  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
 
   <script>
     /************************************************************
@@ -54,44 +72,74 @@
      ************************************************************/
     const APPS_SCRIPT_URL = "https://cesarbe454.github.io/escaner-codigos/"; // 👈 REEMPLAZAR
 
+    // Anti-duplicados al guardar
+    let lastSaved = "";
+    let lastSavedAt = 0;
+    const DUP_MS = 2000;
+
     /************************************************************
      * ELEMENTOS
      ************************************************************/
     const videoEl = document.getElementById("video");
+    const canvasEl = document.getElementById("canvas");
+
     const logEl = document.getElementById("log");
 
     const btnStart = document.getElementById("btnStart");
     const btnStop  = document.getElementById("btnStop");
     const btnScan  = document.getElementById("btnScan");
+    const btnOCR   = document.getElementById("btnOCR");
+    const btnCopy  = document.getElementById("btnCopy");
+    const btnSaveDetected = document.getElementById("btnSaveDetected");
 
     const userEl = document.getElementById("user");
     const manualCodeEl = document.getElementById("manualCode");
     const btnSendManual = document.getElementById("btnSendManual");
 
     const lastDetectedEl = document.getElementById("lastDetected");
-    const lastSavedEl = document.getElementById("lastSaved");
+    const detectedTextEl = document.getElementById("detectedText");
 
     let codeReader = null;
     let controls = null;
 
-    // Guardamos el "último detectado" y el "último guardado"
+    // Para flujo con botón: guardamos el último detectado por ZXing
     let lastDetected = "";
-    let lastSaved = "";
-    let lastSavedAt = 0;
-    const DUP_MS = 2000;
 
     function log(msg, cls="") {
       const line = cls ? `<span class="${cls}">${msg}</span>` : msg;
       logEl.innerHTML = line + "\n" + logEl.innerHTML;
     }
 
+    function setUI(state) {
+      // state: "started" | "stopped" | "busy"
+      const started = state === "started";
+      const busy = state === "busy";
+
+      btnStart.disabled = started || busy;
+      btnStop.disabled  = !started || busy;
+
+      btnScan.disabled  = !started || busy;
+      btnOCR.disabled   = !started || busy;
+
+      // Copiar/Guardar detectado se habilita si hay texto
+      const hasText = (detectedTextEl.value || "").trim().length > 0;
+      btnCopy.disabled = !hasText || busy;
+      btnSaveDetected.disabled = !hasText || busy;
+
+      // Manual siempre disponible (excepto busy si quieres)
+      btnSendManual.disabled = busy;
+    }
+
     async function sendCode(code) {
       const user = (userEl.value || "").trim();
       if (!user) { alert("Debes escribir el usuario."); return; }
 
+      const clean = String(code || "").trim();
+      if (!clean) { alert("Código vacío."); return; }
+
       const now = Date.now();
-      if (code === lastSaved && (now - lastSavedAt) < DUP_MS) {
-        log("↺ Duplicado ignorado: " + code);
+      if (clean === lastSaved && (now - lastSavedAt) < DUP_MS) {
+        log("↺ Duplicado ignorado: " + clean);
         return;
       }
 
@@ -99,15 +147,14 @@
         const res = await fetch(APPS_SCRIPT_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code, user })
+          body: JSON.stringify({ code: clean, user })
         });
 
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {
-          lastSaved = code;
+          lastSaved = clean;
           lastSavedAt = now;
-          lastSavedEl.textContent = code;
-          log(`✓ Guardado | Código: ${code} | Usuario: ${user}`, "ok");
+          log(`✓ Guardado | Código: ${clean} | Usuario: ${user}`, "ok");
         } else {
           log(`✗ Error API: ${data.error || res.status}`, "err");
         }
@@ -116,21 +163,27 @@
       }
     }
 
-    function setUI(state) {
-      // state: "stopped" | "started"
-      if (state === "started") {
-        btnStart.disabled = true;
-        btnStop.disabled = false;
-        btnScan.disabled = false;
-      } else {
-        btnStart.disabled = false;
-        btnStop.disabled = true;
-        btnScan.disabled = true;
-      }
+    function captureFrameToCanvas() {
+      // Captura un frame del video en canvas
+      const w = videoEl.videoWidth;
+      const h = videoEl.videoHeight;
+      if (!w || !h) throw new Error("La cámara aún no está lista.");
+      canvasEl.width = w;
+      canvasEl.height = h;
+      const ctx = canvasEl.getContext("2d");
+      ctx.drawImage(videoEl, 0, 0, w, h);
+      return canvasEl;
+    }
+
+    function extractDigits(text) {
+      // Solo números (y espacios), luego compacta
+      // Si quieres permitir guiones, cambia la regex.
+      const digits = (text || "").match(/\d+/g);
+      return digits ? digits.join("") : "";
     }
 
     /************************************************************
-     * INICIAR CÁMARA (NO GUARDA AUTOMÁTICO)
+     * INICIAR CÁMARA (detecta continuamente, pero NO guarda solo)
      ************************************************************/
     btnStart.addEventListener("click", async () => {
       if (APPS_SCRIPT_URL.includes("PEGA_AQUI")) {
@@ -159,7 +212,6 @@
 
         setUI("started");
 
-        // Detecta continuamente, pero SOLO actualiza "último detectado"
         controls = await codeReader.decodeFromVideoDevice(
           null,
           videoEl,
@@ -172,7 +224,7 @@
           }
         );
 
-        log("📷 Cámara iniciada. Apunta al código y presiona “Escanear”.");
+        log("📷 Cámara iniciada. Usa “Escanear” o “Detectar números (OCR)”.");
       } catch (e) {
         setUI("stopped");
         log("No se pudo iniciar la cámara: " + e.message, "err");
@@ -180,14 +232,78 @@
     });
 
     /************************************************************
-     * BOTÓN ESCANEAR (GUARDA EL ÚLTIMO DETECTADO)
+     * BOTÓN ESCANEAR (guarda el último detectado por ZXing)
      ************************************************************/
     btnScan.addEventListener("click", () => {
       if (!lastDetected) {
-        alert("No se detectó ningún código. Acerca la cámara y vuelve a intentar.");
+        alert("No se detectó código. Acerca la cámara al código de barras/QR y vuelve a intentar.");
         return;
       }
       sendCode(lastDetected);
+    });
+
+    /************************************************************
+     * BOTÓN OCR (si no lee el código de barras, detecta números)
+     ************************************************************/
+    btnOCR.addEventListener("click", async () => {
+      try {
+        setUI("busy");
+        log("🔎 OCR en proceso... (puede tardar unos segundos)");
+
+        const canvas = captureFrameToCanvas();
+
+        // OCR: solo números (whitelist) y español/inglés para robustez
+        const { data } = await Tesseract.recognize(canvas, "eng", {
+          tessedit_char_whitelist: "0123456789",
+        });
+
+        const raw = (data && data.text) ? data.text : "";
+        const digits = extractDigits(raw);
+
+        if (!digits) {
+          detectedTextEl.value = "";
+          log("⚠️ OCR no encontró números claros. Prueba con más luz y acercando la etiqueta.", "err");
+        } else {
+          detectedTextEl.value = digits;
+          log("✅ OCR detectó: " + digits, "ok");
+        }
+
+        // Actualiza botones copiar/guardar
+        setUI("started");
+      } catch (e) {
+        setUI("started");
+        log("✗ OCR falló: " + e.message, "err");
+      }
+    });
+
+    /************************************************************
+     * COPIAR EL TEXTO DETECTADO
+     ************************************************************/
+    btnCopy.addEventListener("click", async () => {
+      const text = (detectedTextEl.value || "").trim();
+      if (!text) return;
+
+      try {
+        await navigator.clipboard.writeText(text);
+        log("📋 Copiado al portapapeles: " + text, "ok");
+      } catch {
+        // Fallback viejo
+        detectedTextEl.select();
+        document.execCommand("copy");
+        log("📋 Copiado (modo compatibilidad): " + text, "ok");
+      }
+    });
+
+    /************************************************************
+     * GUARDAR EL TEXTO DETECTADO (OCR) EN SHEETS
+     ************************************************************/
+    btnSaveDetected.addEventListener("click", () => {
+      const text = (detectedTextEl.value || "").trim();
+      if (!text) {
+        alert("No hay números detectados para guardar.");
+        return;
+      }
+      sendCode(text);
     });
 
     /************************************************************
@@ -211,6 +327,24 @@
       sendCode(code);
       manualCodeEl.value = "";
     });
+
+    /************************************************************
+     * Habilitar botones copiar/guardar cuando cambie el input OCR
+     ************************************************************/
+    detectedTextEl.addEventListener("input", () => {
+      // Si la cámara está activa, mantenemos "started"
+      // Si no, solo ajustamos copiar/guardar
+      const started = !btnStop.disabled; // si Stop está habilitado, está started
+      if (started) setUI("started");
+      else {
+        const hasText = (detectedTextEl.value || "").trim().length > 0;
+        btnCopy.disabled = !hasText;
+        btnSaveDetected.disabled = !hasText;
+      }
+    });
+
+    // Estado inicial
+    setUI("stopped");
   </script>
 
 </body>
